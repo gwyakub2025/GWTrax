@@ -1,0 +1,6 @@
+{
+  "name": "GWTrax Fleet Management",
+  "description": "Real-time fleet tracking, automated route optimization, driver performance scoring, and universal GPS hardware synchronization. Track Smart. Move Better.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
