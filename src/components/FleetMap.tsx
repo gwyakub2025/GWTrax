@@ -259,10 +259,14 @@ export const FleetMap: React.FC<FleetMapProps> = ({
           ctx.strokeStyle = v.id === selectedVehicleId ? '#10b981' : '#38bdf844';
           ctx.lineWidth = v.id === selectedVehicleId ? 2.5 : 1.5;
           ctx.beginPath();
-          v.historyTrail.forEach((pt, idx) => {
-            const p = geoToPixel(pt[0], pt[1], width, height);
-            if (idx === 0) ctx.moveTo(p.x, p.y);
-            else ctx.lineTo(p.x, p.y);
+          v.historyTrail.forEach((pt: any, idx) => {
+            const ptLat = Array.isArray(pt) ? pt[0] : pt?.lat;
+            const ptLng = Array.isArray(pt) ? pt[1] : pt?.lng;
+            if (ptLat !== undefined && ptLng !== undefined) {
+              const p = geoToPixel(ptLat, ptLng, width, height);
+              if (idx === 0) ctx.moveTo(p.x, p.y);
+              else ctx.lineTo(p.x, p.y);
+            }
           });
           ctx.stroke();
         }
@@ -472,7 +476,16 @@ export const FleetMap: React.FC<FleetMapProps> = ({
 
         {/* Vehicle list */}
         <div className="flex-1 overflow-y-auto divide-y divide-slate-800/60">
-          {filteredVehicles.map((vehicle) => {
+          {filteredVehicles.length === 0 ? (
+            <div className="p-6 text-center text-xs text-slate-500">
+              <Truck className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+              <p className="font-medium text-slate-300">No Trackers Found</p>
+              <p className="text-[11px] text-slate-400 mt-1">
+                Register a hardware tracker or connect a mobile phone beacon to track live GPS.
+              </p>
+            </div>
+          ) : (
+            filteredVehicles.map((vehicle) => {
             const isSelected = vehicle.id === selectedVehicleId;
             return (
               <div
@@ -544,7 +557,7 @@ export const FleetMap: React.FC<FleetMapProps> = ({
                 </div>
               </div>
             );
-          })}
+          }))}
         </div>
       </div>
 

@@ -13,7 +13,7 @@ export interface Vehicle {
   location: {
     latitude: number;
     longitude: number;
-    address: number | string;
+    address: string;
     city: string;
     country: string;
   };

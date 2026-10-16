@@ -1,0 +1,144 @@
+{
+  "entities": {
+    "Vehicle": {
+      "title": "Vehicle",
+      "description": "Commercial fleet vehicle tracked via GPS hardware or mobile client",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique vehicle ID" },
+        "plateNumber": { "type": "string", "maxLength": 32, "description": "Vehicle registration license plate" },
+        "name": { "type": "string", "maxLength": 128, "description": "Vehicle make, model or descriptor" },
+        "type": { "type": "string", "enum": ["heavy_truck", "reefer_truck", "delivery_van", "tanker", "flatbed"] },
+        "driverId": { "type": "string", "description": "Assigned driver reference" },
+        "driverName": { "type": "string", "maxLength": 128, "description": "Assigned driver name" },
+        "status": { "type": "string", "enum": ["moving", "idle", "stopped", "offline", "alert"] },
+        "location": {
+          "type": "object",
+          "description": "Geographical location coordinates and address"
+        },
+        "telemetry": {
+          "type": "object",
+          "description": "Live telematics sensors: speed, fuel, temperature, battery, etc."
+        },
+        "deviceInfo": {
+          "type": "object",
+          "description": "Hardware GPS tracker specs, IMEI, port, carrier"
+        },
+        "currentRoute": {
+          "type": "object",
+          "description": "Current active dispatched route and ETA"
+        },
+        "historyTrail": {
+          "type": "array",
+          "description": "Recent coordinate history breadcrumbs"
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "plateNumber", "name", "type", "status"]
+    },
+    "Driver": {
+      "title": "Driver",
+      "description": "Fleet logistics driver performance and safety record",
+      "type": "object",
+      "properties": {
+        "driverId": { "type": "string" },
+        "name": { "type": "string", "maxLength": 128 },
+        "avatarUrl": { "type": "string" },
+        "assignedVehicle": { "type": "string" },
+        "licenseNumber": { "type": "string", "maxLength": 64 },
+        "contactNumber": { "type": "string", "maxLength": 32 },
+        "yearsExperience": { "type": "number" },
+        "totalDistanceKm": { "type": "number" },
+        "totalDriveHours": { "type": "number" },
+        "harshBrakingCount": { "type": "number" },
+        "harshAccelerationCount": { "type": "number" },
+        "harshCorneringCount": { "type": "number" },
+        "excessiveIdlingHours": { "type": "number" },
+        "speedingIncidentsCount": { "type": "number" },
+        "dmsDistractionAlerts": { "type": "number" },
+        "seatbeltViolations": { "type": "number" },
+        "fuelConsumedLiters": { "type": "number" },
+        "idleFuelWastedLiters": { "type": "number" }
+      },
+      "required": ["driverId", "name", "licenseNumber"]
+    },
+    "Geofence": {
+      "title": "Geofence",
+      "description": "Virtual geographic boundary for entrance and exit monitoring",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "enum": ["polygon", "circle"] },
+        "category": { "type": "string", "enum": ["logistics_hub", "port", "industrial", "restricted", "customer"] },
+        "speedLimitKmh": { "type": "number" },
+        "color": { "type": "string", "maxLength": 16 },
+        "center": { "type": "array" },
+        "radiusMeters": { "type": "number" },
+        "coordinates": { "type": "array" },
+        "activeVehiclesInside": { "type": "array" }
+      },
+      "required": ["id", "name", "type", "category"]
+    },
+    "FleetAlert": {
+      "title": "FleetAlert",
+      "description": "Real-time safety or boundary breach alert event",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "vehicleId": { "type": "string" },
+        "vehicleName": { "type": "string" },
+        "driverName": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "severity": { "type": "string", "enum": ["critical", "warning", "info"] },
+        "type": { "type": "string" },
+        "title": { "type": "string", "maxLength": 256 },
+        "description": { "type": "string", "maxLength": 512 },
+        "location": { "type": "string" },
+        "acknowledged": { "type": "boolean" }
+      },
+      "required": ["id", "vehicleId", "severity", "title", "acknowledged"]
+    },
+    "RoutePlan": {
+      "title": "RoutePlan",
+      "description": "Optimized delivery route sequence",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string", "maxLength": 128 },
+        "assignedVehicleId": { "type": "string" },
+        "waypoints": { "type": "array" },
+        "totalDistanceKm": { "type": "number" },
+        "distanceSavedKm": { "type": "number" },
+        "fuelCostSavedAed": { "type": "number" },
+        "co2SavedKg": { "type": "number" },
+        "status": { "type": "string", "enum": ["draft", "dispatched", "in_transit", "completed"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "waypoints"]
+    }
+  },
+  "firestore": {
+    "/vehicles/{vehicleId}": {
+      "schema": { "$ref": "entities.Vehicle" },
+      "description": "Collection of active and registered fleet vehicles and telematics"
+    },
+    "/drivers/{driverId}": {
+      "schema": { "$ref": "entities.Driver" },
+      "description": "Collection of fleet drivers and telematics safety scorecards"
+    },
+    "/geofences/{geofenceId}": {
+      "schema": { "$ref": "entities.Geofence" },
+      "description": "Collection of virtual geofence boundaries"
+    },
+    "/alerts/{alertId}": {
+      "schema": { "$ref": "entities.FleetAlert" },
+      "description": "Collection of telematics incident alarms and alerts"
+    },
+    "/routes/{routeId}": {
+      "schema": { "$ref": "entities.RoutePlan" },
+      "description": "Collection of dispatched optimized multi-stop routes"
+    }
+  }
+}

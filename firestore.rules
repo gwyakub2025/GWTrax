@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Vehicles collection
+    match /vehicles/{vehicleId} {
+      allow get: if isValidId(vehicleId);
+      allow list: if true;
+      allow create: if isValidId(vehicleId)
+        && incoming().plateNumber is string
+        && incoming().plateNumber.size() <= 32
+        && incoming().name is string
+        && incoming().name.size() <= 128;
+      allow update: if isValidId(vehicleId);
+      allow delete: if isValidId(vehicleId);
+    }
+
+    // Drivers collection
+    match /drivers/{driverId} {
+      allow get: if isValidId(driverId);
+      allow list: if true;
+      allow create: if isValidId(driverId)
+        && incoming().name is string
+        && incoming().name.size() <= 128;
+      allow update: if isValidId(driverId);
+      allow delete: if isValidId(driverId);
+    }
+
+    // Geofences collection
+    match /geofences/{geofenceId} {
+      allow get: if isValidId(geofenceId);
+      allow list: if true;
+      allow create: if isValidId(geofenceId)
+        && incoming().name is string
+        && incoming().name.size() <= 128;
+      allow update: if isValidId(geofenceId);
+      allow delete: if isValidId(geofenceId);
+    }
+
+    // Alerts collection
+    match /alerts/{alertId} {
+      allow get: if isValidId(alertId);
+      allow list: if true;
+      allow create: if isValidId(alertId)
+        && incoming().title is string
+        && incoming().title.size() <= 256;
+      allow update: if isValidId(alertId);
+      allow delete: if isValidId(alertId);
+    }
+
+    // Dispatched Route plans collection
+    match /routes/{routeId} {
+      allow get: if isValidId(routeId);
+      allow list: if true;
+      allow create: if isValidId(routeId)
+        && incoming().name is string
+        && incoming().name.size() <= 128;
+      allow update: if isValidId(routeId);
+      allow delete: if isValidId(routeId);
+    }
+
+    // Connection test document
+    match /test/{docId} {
+      allow read, write: if true;
+    }
+  }
+}
