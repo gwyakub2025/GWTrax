@@ -15,8 +15,8 @@ import {
 } from 'lucide-react';
 
 interface NavbarProps {
-  activeTab: 'dashboard' | 'map' | 'routes' | 'drivers' | 'devices' | 'alerts';
-  setActiveTab: (tab: 'dashboard' | 'map' | 'routes' | 'drivers' | 'devices' | 'alerts') => void;
+  activeTab: 'dashboard' | 'map' | 'routes' | 'drivers' | 'devices' | 'alerts' | 'tracker';
+  setActiveTab: (tab: 'dashboard' | 'map' | 'routes' | 'drivers' | 'devices' | 'alerts' | 'tracker') => void;
   isSimulating: boolean;
   setIsSimulating: (sim: boolean) => void;
   simulationSpeed: number;

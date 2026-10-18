@@ -14,6 +14,7 @@ import { DeviceAdvisorView } from './components/DeviceAdvisorView.tsx';
 import { GeofenceAlertsView } from './components/GeofenceAlertsView.tsx';
 import { ConnectMobileModal } from './components/ConnectMobileModal.tsx';
 import { RegisterVehicleModal } from './components/RegisterVehicleModal.tsx';
+import { MobileTrackerView } from './components/MobileTrackerView.tsx';
 import { 
   INITIAL_VEHICLES, 
   INITIAL_DRIVERS, 
@@ -47,7 +48,7 @@ import {
 import { Database, CheckCircle2, RefreshCw, AlertCircle, Plus, Trash2 } from 'lucide-react';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'map' | 'routes' | 'drivers' | 'devices' | 'alerts'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'map' | 'routes' | 'drivers' | 'devices' | 'alerts' | 'tracker'>('dashboard');
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [drivers, setDrivers] = useState<DriverMetrics[]>([]);
   const [geofences, setGeofences] = useState<GeofenceZone[]>([]);
@@ -63,6 +64,11 @@ export default function App() {
 
   // Initialize and subscribe to Firestore
   useEffect(() => {
+    // Check if phone accessed with ?mode=tracker
+    if (typeof window !== 'undefined' && window.location.search.includes('mode=tracker')) {
+      setActiveTab('tracker');
+    }
+
     testFirestoreConnection().then((connected) => {
       setFirebaseConnected(connected);
     });
@@ -566,6 +572,14 @@ export default function App() {
             setAlerts={handleSetAlerts}
           />
         )}
+
+        {activeTab === 'tracker' && (
+          <MobileTrackerView
+            onBackToFleet={() => setActiveTab('map')}
+            onSaveVehicle={handleUpdateMobileVehicle}
+            initialDeviceId="0582649777"
+          />
+        )}
       </main>
 
       {/* Register New Vehicle & Hardware Modal */}
@@ -580,6 +594,10 @@ export default function App() {
         isOpen={isMobileModalOpen}
         onClose={() => setIsMobileModalOpen(false)}
         onUpdateMobileVehicle={handleUpdateMobileVehicle}
+        onOpenMobileTerminal={() => {
+          setIsMobileModalOpen(false);
+          setActiveTab('tracker');
+        }}
       />
     </div>
   );
