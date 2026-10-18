@@ -170,6 +170,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           <span className="hidden md:inline">Mobile Beacon</span>
         </button>
 
+
         {/* Simulation toggle */}
         <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-xs">
           <button

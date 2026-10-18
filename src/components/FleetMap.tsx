@@ -1,4 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import {
+  APIProvider,
+  Map,
+  AdvancedMarker,
+  InfoWindow,
+  useMap,
+  useMapsLibrary
+} from '@vis.gl/react-google-maps';
 import { 
   Truck, 
   Gauge, 
@@ -22,7 +30,12 @@ import {
   ArrowUpRight,
   ShieldCheck,
   Zap,
-  Info
+  Smartphone,
+  Navigation,
+  Satellite,
+  Crosshair,
+  ExternalLink,
+  RefreshCw
 } from 'lucide-react';
 import { Vehicle, GeofenceZone } from '../types/fleet.ts';
 
@@ -35,6 +48,276 @@ interface FleetMapProps {
   onOpenRouteOptimizer: () => void;
 }
 
+// Error Boundary specifically for Google Maps Platform SDK
+interface ErrorBoundaryProps {
+  fallback: (error: Error | null) => React.ReactNode;
+  children: React.ReactNode;
+}
+
+class GoogleMapErrorBoundary extends React.Component<
+  ErrorBoundaryProps,
+  { hasError: boolean; error: Error | null }
+> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.warn('Google Maps Platform runtime error caught by boundary:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback(this.state.error);
+    }
+    return this.props.children;
+  }
+}
+
+// Sub-component: Camera Auto-Follow & Centering Controller
+const MapCameraController: React.FC<{
+  selectedVehicle: Vehicle | null;
+  autoCenterEnabled: boolean;
+}> = ({ selectedVehicle, autoCenterEnabled }) => {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!map) return;
+    if (selectedVehicle && autoCenterEnabled) {
+      map.panTo({
+        lat: selectedVehicle.location.latitude,
+        lng: selectedVehicle.location.longitude
+      });
+      const currentZoom = map.getZoom() || 12;
+      if (currentZoom < 14) {
+        map.setZoom(15);
+      }
+    }
+  }, [map, selectedVehicle?.location.latitude, selectedVehicle?.location.longitude, autoCenterEnabled]);
+
+  return null;
+};
+
+// Sub-component: Real-Time Google Maps Traffic Layer
+const TrafficLayerComponent: React.FC<{ enabled: boolean }> = ({ enabled }) => {
+  const map = useMap();
+  const mapsLib = useMapsLibrary('maps');
+  const layerRef = useRef<google.maps.TrafficLayer | null>(null);
+
+  useEffect(() => {
+    if (!map || !mapsLib) return;
+
+    if (enabled) {
+      if (!layerRef.current) {
+        layerRef.current = new google.maps.TrafficLayer();
+      }
+      layerRef.current.setMap(map);
+    } else {
+      if (layerRef.current) {
+        layerRef.current.setMap(null);
+      }
+    }
+
+    return () => {
+      if (layerRef.current) {
+        layerRef.current.setMap(null);
+      }
+    };
+  }, [map, mapsLib, enabled]);
+
+  return null;
+};
+
+// Sub-component: Vehicle Breadcrumb Trajectory Path Polyline
+const VehicleTrailPolyline: React.FC<{
+  vehicle: Vehicle | null;
+  enabled: boolean;
+}> = ({ vehicle, enabled }) => {
+  const map = useMap();
+  const mapsLib = useMapsLibrary('maps');
+  const polylineRef = useRef<google.maps.Polyline | null>(null);
+
+  useEffect(() => {
+    if (!map || !mapsLib) return;
+
+    if (polylineRef.current) {
+      polylineRef.current.setMap(null);
+      polylineRef.current = null;
+    }
+
+    if (!enabled || !vehicle || !vehicle.historyTrail || vehicle.historyTrail.length < 2) {
+      return;
+    }
+
+    const path: google.maps.LatLngLiteral[] = vehicle.historyTrail.map((pt: any) => {
+      if (Array.isArray(pt)) {
+        return { lat: pt[0], lng: pt[1] };
+      }
+      return { lat: pt.lat, lng: pt.lng };
+    });
+
+    path.push({
+      lat: vehicle.location.latitude,
+      lng: vehicle.location.longitude
+    });
+
+    polylineRef.current = new google.maps.Polyline({
+      path,
+      geodesic: true,
+      strokeColor: vehicle.status === 'moving' ? '#10b981' : '#38bdf8',
+      strokeOpacity: 0.85,
+      strokeWeight: 4,
+      map
+    });
+
+    return () => {
+      if (polylineRef.current) {
+        polylineRef.current.setMap(null);
+      }
+    };
+  }, [map, mapsLib, vehicle?.id, vehicle?.historyTrail, vehicle?.location.latitude, vehicle?.location.longitude, enabled]);
+
+  return null;
+};
+
+// Sub-component: Geofence Zones Overlay (Circles & Polygons)
+const GeofenceOverlays: React.FC<{
+  geofences: GeofenceZone[];
+  enabled: boolean;
+}> = ({ geofences, enabled }) => {
+  const map = useMap();
+  const mapsLib = useMapsLibrary('maps');
+  const shapesRef = useRef<(google.maps.Circle | google.maps.Polygon)[]>([]);
+
+  useEffect(() => {
+    shapesRef.current.forEach(s => s.setMap(null));
+    shapesRef.current = [];
+
+    if (!map || !mapsLib || !enabled || geofences.length === 0) return;
+
+    geofences.forEach(zone => {
+      const isRestricted = zone.category === 'restricted';
+      const color = isRestricted ? '#ef4444' : '#0ea5e9';
+
+      if (zone.type === 'circle' && zone.center && zone.radiusMeters) {
+        const centerLat = Array.isArray(zone.center) ? zone.center[0] : (zone.center as any).latitude;
+        const centerLng = Array.isArray(zone.center) ? zone.center[1] : (zone.center as any).longitude;
+        const circle = new google.maps.Circle({
+          strokeColor: color,
+          strokeOpacity: 0.8,
+          strokeWeight: 2,
+          fillColor: color,
+          fillOpacity: 0.12,
+          map,
+          center: { lat: centerLat, lng: centerLng },
+          radius: zone.radiusMeters
+        });
+        shapesRef.current.push(circle);
+      } else if (zone.coordinates && zone.coordinates.length >= 3) {
+        const paths = zone.coordinates.map((c: any) => ({
+          lat: Array.isArray(c) ? c[0] : c.latitude,
+          lng: Array.isArray(c) ? c[1] : c.longitude
+        }));
+        const polygon = new google.maps.Polygon({
+          paths,
+          strokeColor: color,
+          strokeOpacity: 0.8,
+          strokeWeight: 2,
+          fillColor: color,
+          fillOpacity: 0.12,
+          map
+        });
+        shapesRef.current.push(polygon);
+      }
+    });
+
+    return () => {
+      shapesRef.current.forEach(s => s.setMap(null));
+      shapesRef.current = [];
+    };
+  }, [map, mapsLib, geofences, enabled]);
+
+  return null;
+};
+
+// Guarded Markers Container: only mounts AdvancedMarkers once the map instance is ready
+const FleetAdvancedMarkers: React.FC<{
+  vehicles: Vehicle[];
+  selectedVehicleId: string | null;
+  onSelectVehicle: (id: string) => void;
+}> = ({ vehicles, selectedVehicleId, onSelectVehicle }) => {
+  const map = useMap();
+  if (!map) return null;
+
+  return (
+    <>
+      {vehicles.map((vehicle) => {
+        const isSelected = selectedVehicleId === vehicle.id;
+        const isMoving = vehicle.status === 'moving';
+        const isIdle = vehicle.status === 'idle';
+        const isPhone = vehicle.deviceInfo?.protocol?.includes('OsmAnd') || vehicle.id.startsWith('MOB-');
+
+        return (
+          <AdvancedMarker
+            key={vehicle.id}
+            position={{
+              lat: vehicle.location.latitude,
+              lng: vehicle.location.longitude
+            }}
+            onClick={() => onSelectVehicle(vehicle.id)}
+            title={`${vehicle.plateNumber} (${vehicle.name})`}
+          >
+            {/* Custom High-Definition Pin Design */}
+            <div className="relative group cursor-pointer flex flex-col items-center">
+              {/* Live Speed / Plate Badge */}
+              <div className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold shadow-lg flex items-center gap-1 border transition-all ${
+                isSelected
+                  ? 'bg-slate-900 text-emerald-300 border-emerald-400 scale-110'
+                  : isMoving
+                  ? 'bg-slate-950/90 text-emerald-400 border-emerald-500/50'
+                  : isIdle
+                  ? 'bg-slate-950/90 text-amber-400 border-amber-500/50'
+                  : 'bg-slate-950/90 text-slate-400 border-slate-700'
+              }`}>
+                <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
+                <span>{vehicle.plateNumber}</span>
+                {isMoving && <span>· {vehicle.telemetry.speedKmh}k</span>}
+              </div>
+
+              {/* Icon Bubble */}
+              <div className={`mt-1 w-8 h-8 rounded-full border-2 flex items-center justify-center shadow-xl transition-transform ${
+                isSelected
+                  ? 'bg-emerald-500 border-white text-slate-950 scale-110 ring-4 ring-emerald-500/30'
+                  : isMoving
+                  ? 'bg-slate-900 border-emerald-400 text-emerald-400'
+                  : isIdle
+                  ? 'bg-slate-900 border-amber-400 text-amber-400'
+                  : 'bg-slate-900 border-slate-600 text-slate-400'
+              }`}>
+                {isPhone ? (
+                  <Smartphone className="w-4 h-4" />
+                ) : (
+                  <Truck className="w-4 h-4" />
+                )}
+              </div>
+
+              {/* Ripple ring for active moving vehicles */}
+              {isMoving && (
+                <span className="absolute bottom-1 w-10 h-10 rounded-full bg-emerald-500/20 animate-ping pointer-events-none" />
+              )}
+            </div>
+          </AdvancedMarker>
+        );
+      })}
+    </>
+  );
+};
+
 export const FleetMap: React.FC<FleetMapProps> = ({
   vehicles,
   setVehicles,
@@ -43,889 +326,663 @@ export const FleetMap: React.FC<FleetMapProps> = ({
   setSelectedVehicleId,
   onOpenRouteOptimizer
 }) => {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'moving' | 'idle' | 'stopped' | 'alert'>('all');
   const [showGeofences, setShowGeofences] = useState(true);
   const [showTrails, setShowTrails] = useState(true);
-  const [mapZoom, setMapZoom] = useState(1);
-  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
-  const [isDragging, setIsDragging] = useState(false);
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const [showTraffic, setShowTraffic] = useState(false);
+  const [autoFollow, setAutoFollow] = useState(true);
+  const [mapTheme, setMapTheme] = useState<'roadmap' | 'satellite' | 'hybrid'>('roadmap');
+  
+  const [authError, setAuthError] = useState<string | null>(null);
   const [immobilizerConfirmModal, setImmobilizerConfirmModal] = useState<Vehicle | null>(null);
   const [commandFeedback, setCommandFeedback] = useState<string | null>(null);
+
+  // Google Maps API Key resolved from secret store or environment
+  const googleMapsApiKey =
+    import.meta.env.VITE_GOOGLE_MAPS_API_KEY ||
+    'AIzaSyDqKdnwICmr09ptifBARxhNVZjaIoavLkc';
+
+  // Listen for Google Maps Authentication / ApiNotActivated failure
+  useEffect(() => {
+    const handleAuthFailure = () => {
+      setAuthError('Maps JavaScript API is not yet activated on this Google Cloud project.');
+    };
+    (window as any).gm_authFailure = handleAuthFailure;
+    return () => {
+      delete (window as any).gm_authFailure;
+    };
+  }, []);
 
   const selectedVehicle = vehicles.find((v) => v.id === selectedVehicleId) || null;
 
   // Filtered vehicles
-  const filteredVehicles = vehicles.filter((v) => {
-    const matchesQuery = 
-      v.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      v.plateNumber.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      v.driverName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      v.location.city.toLowerCase().includes(searchQuery.toLowerCase());
-    
-    if (statusFilter === 'all') return matchesQuery;
-    return matchesQuery && v.status === statusFilter;
-  });
-
-  // Calculate center of filtered vehicles
-  const bounds = React.useMemo(() => {
-    if (vehicles.length === 0) return { minLat: 23, maxLat: 27, minLng: 46, maxLng: 59 };
-    const lats = vehicles.map(v => v.location.latitude);
-    const lngs = vehicles.map(v => v.location.longitude);
-    return {
-      minLat: Math.min(...lats) - 0.2,
-      maxLat: Math.max(...lats) + 0.2,
-      minLng: Math.min(...lngs) - 0.3,
-      maxLng: Math.max(...lngs) + 0.3
-    };
-  }, [vehicles]);
-
-  // Transform Geo Coordinates to Canvas Pixels
-  const geoToPixel = (lat: number, lng: number, width: number, height: number) => {
-    const latSpan = bounds.maxLat - bounds.minLat || 1;
-    const lngSpan = bounds.maxLng - bounds.minLng || 1;
-
-    // Normalizing
-    const normX = (lng - bounds.minLng) / lngSpan;
-    const normY = (bounds.maxLat - lat) / latSpan; // inverted Y
-
-    const basePadding = 60;
-    const drawWidth = width - basePadding * 2;
-    const drawHeight = height - basePadding * 2;
-
-    const centerX = width / 2;
-    const centerY = height / 2;
-
-    const rawX = basePadding + normX * drawWidth;
-    const rawY = basePadding + normY * drawHeight;
-
-    // Apply zoom & pan
-    const zoomedX = centerX + (rawX - centerX) * mapZoom + panOffset.x;
-    const zoomedY = centerY + (rawY - centerY) * mapZoom + panOffset.y;
-
-    return { x: zoomedX, y: zoomedY };
-  };
-
-  // Center on vehicle
-  const centerOnVehicle = (vehicle: Vehicle) => {
-    setSelectedVehicleId(vehicle.id);
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const latSpan = bounds.maxLat - bounds.minLat || 1;
-    const lngSpan = bounds.maxLng - bounds.minLng || 1;
-    const normX = (vehicle.location.longitude - bounds.minLng) / lngSpan;
-    const normY = (bounds.maxLat - vehicle.location.latitude) / latSpan;
-    const drawWidth = canvas.width - 120;
-    const drawHeight = canvas.height - 120;
-    const targetX = 60 + normX * drawWidth;
-    const targetY = 60 + normY * drawHeight;
-    setPanOffset({
-      x: (canvas.width / 2 - targetX) * mapZoom,
-      y: (canvas.height / 2 - targetY) * mapZoom
-    });
-  };
-
-  // Canvas Drawing Loop
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    // Set high DPI resolution
-    const rect = canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
-
-    const width = rect.width;
-    const height = rect.height;
-
-    // 1. Dark high-tech background
-    ctx.fillStyle = '#090d16';
-    ctx.fillRect(0, 0, width, height);
-
-    // 2. Subtle geographical grid lines
-    ctx.strokeStyle = '#1e293b';
-    ctx.lineWidth = 0.5;
-    const gridSize = 60 * mapZoom;
-    const offsetX = panOffset.x % gridSize;
-    const offsetY = panOffset.y % gridSize;
-
-    for (let x = offsetX; x < width; x += gridSize) {
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, height);
-      ctx.stroke();
-    }
-    for (let y = offsetY; y < height; y += gridSize) {
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(width, y);
-      ctx.stroke();
-    }
-
-    // 3. Render Simulated Regional Highway Networks
-    // Sheikh Zayed E11, E311, Riyadh Arterials, Muscat Highway
-    const highways = [
-      // Dubai corridor (JAFZA -> Downtown -> Sharjah)
-      [
-        { lat: 24.980, lng: 55.050 },
-        { lat: 25.045, lng: 55.122 },
-        { lat: 25.123, lng: 55.204 },
-        { lat: 25.197, lng: 55.274 },
-        { lat: 25.320, lng: 55.380 }
-      ],
-      // Riyadh Olaya corridor
-      [
-        { lat: 24.620, lng: 46.660 },
-        { lat: 24.713, lng: 46.675 },
-        { lat: 24.810, lng: 46.690 }
-      ],
-      // Muscat Coastal Highway
-      [
-        { lat: 23.550, lng: 58.450 },
-        { lat: 23.614, lng: 58.545 },
-        { lat: 23.680, lng: 58.620 }
-      ]
-    ];
-
-    highways.forEach((hw) => {
-      ctx.strokeStyle = '#1e2e4a';
-      ctx.lineWidth = 4 * mapZoom;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.beginPath();
-      hw.forEach((pt, idx) => {
-        const p = geoToPixel(pt.lat, pt.lng, width, height);
-        if (idx === 0) ctx.moveTo(p.x, p.y);
-        else ctx.lineTo(p.x, p.y);
-      });
-      ctx.stroke();
-
-      // Highway inner glow line
-      ctx.strokeStyle = '#2563eb33';
-      ctx.lineWidth = 1.5 * mapZoom;
-      ctx.stroke();
-    });
-
-    // 4. Render Geofences
-    if (showGeofences) {
-      geofences.forEach((geo) => {
-        if (geo.type === 'polygon' && geo.coordinates) {
-          ctx.beginPath();
-          geo.coordinates.forEach((coord, idx) => {
-            const p = geoToPixel(coord[0], coord[1], width, height);
-            if (idx === 0) ctx.moveTo(p.x, p.y);
-            else ctx.lineTo(p.x, p.y);
-          });
-          ctx.closePath();
-          ctx.fillStyle = geo.color + '18';
-          ctx.fill();
-          ctx.strokeStyle = geo.color + '88';
-          ctx.lineWidth = 1.5;
-          ctx.setLineDash([4, 4]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-
-          // Geofence label
-          const firstPt = geoToPixel(geo.coordinates[0][0], geo.coordinates[0][1], width, height);
-          ctx.fillStyle = geo.color;
-          ctx.font = '10px JetBrains Mono, monospace';
-          ctx.fillText(`ZONE: ${geo.name.substring(0, 24)}...`, firstPt.x + 4, firstPt.y - 4);
-        } else if (geo.type === 'circle' && geo.center) {
-          const centerPt = geoToPixel(geo.center[0], geo.center[1], width, height);
-          const radiusPixels = (geo.radiusMeters || 2000) * 0.015 * mapZoom;
-          ctx.beginPath();
-          ctx.arc(centerPt.x, centerPt.y, radiusPixels, 0, Math.PI * 2);
-          ctx.fillStyle = geo.color + '18';
-          ctx.fill();
-          ctx.strokeStyle = geo.color + '88';
-          ctx.lineWidth = 1.5;
-          ctx.setLineDash([4, 4]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
-      });
-    }
-
-    // 5. Render History Breadcrumb Trails
-    if (showTrails) {
-      vehicles.forEach((v) => {
-        if (v.historyTrail && v.historyTrail.length > 1) {
-          ctx.strokeStyle = v.id === selectedVehicleId ? '#10b981' : '#38bdf844';
-          ctx.lineWidth = v.id === selectedVehicleId ? 2.5 : 1.5;
-          ctx.beginPath();
-          v.historyTrail.forEach((pt: any, idx) => {
-            const ptLat = Array.isArray(pt) ? pt[0] : pt?.lat;
-            const ptLng = Array.isArray(pt) ? pt[1] : pt?.lng;
-            if (ptLat !== undefined && ptLng !== undefined) {
-              const p = geoToPixel(ptLat, ptLng, width, height);
-              if (idx === 0) ctx.moveTo(p.x, p.y);
-              else ctx.lineTo(p.x, p.y);
-            }
-          });
-          ctx.stroke();
-        }
-      });
-    }
-
-    // 6. Render Vehicles
-    vehicles.forEach((v) => {
-      const p = geoToPixel(v.location.latitude, v.location.longitude, width, height);
-      const isSelected = v.id === selectedVehicleId;
-
-      // Status color
-      let statusColor = '#10b981'; // moving
-      if (v.status === 'idle') statusColor = '#f59e0b';
-      if (v.status === 'stopped') statusColor = '#94a3b8';
-      if (v.status === 'alert') statusColor = '#ef4444';
-      if (v.telemetry.immobilizerCutoffActive) statusColor = '#dc2626';
-
-      // Pulse ring for moving or selected
-      if (isSelected || v.status === 'moving') {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, (isSelected ? 22 : 14) + Math.sin(Date.now() / 300) * 2, 0, Math.PI * 2);
-        ctx.fillStyle = statusColor + '20';
-        ctx.fill();
-        ctx.strokeStyle = statusColor + '60';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-      }
-
-      // Vehicle marker circle
-      ctx.save();
-      ctx.translate(p.x, p.y);
-
-      // Bearing pointer
-      ctx.rotate((v.telemetry.headingDeg * Math.PI) / 180);
-      ctx.beginPath();
-      ctx.moveTo(0, -14);
-      ctx.lineTo(5, -6);
-      ctx.lineTo(-5, -6);
-      ctx.closePath();
-      ctx.fillStyle = statusColor;
-      ctx.fill();
-      ctx.restore();
-
-      // Main pin bubble
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, isSelected ? 12 : 9, 0, Math.PI * 2);
-      ctx.fillStyle = '#0f172a';
-      ctx.fill();
-      ctx.strokeStyle = statusColor;
-      ctx.lineWidth = isSelected ? 3 : 2;
-      ctx.stroke();
-
-      // Center dot
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, isSelected ? 4 : 3, 0, Math.PI * 2);
-      ctx.fillStyle = statusColor;
-      ctx.fill();
-
-      // Plate & Speed Label
-      ctx.fillStyle = '#ffffff';
-      ctx.font = isSelected ? 'bold 11px JetBrains Mono, monospace' : '10px JetBrains Mono, monospace';
-      ctx.textAlign = 'center';
+  const filteredVehicles = useMemo(() => {
+    return vehicles.filter((v) => {
+      const q = searchQuery.toLowerCase();
+      const matchesQuery = 
+        v.name.toLowerCase().includes(q) ||
+        v.plateNumber.toLowerCase().includes(q) ||
+        v.driverName.toLowerCase().includes(q) ||
+        v.location.city.toLowerCase().includes(q) ||
+        (v.deviceInfo?.imei && v.deviceInfo.imei.toLowerCase().includes(q));
       
-      // Label pill background
-      const labelText = `${v.plateNumber} · ${v.telemetry.speedKmh} km/h`;
-      const textMetrics = ctx.measureText(labelText);
-      const pillWidth = textMetrics.width + 10;
-      
-      ctx.fillStyle = '#0b0f19ee';
-      ctx.fillRect(p.x - pillWidth / 2, p.y + 14, pillWidth, 18);
-      ctx.strokeStyle = isSelected ? statusColor : '#334155';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(p.x - pillWidth / 2, p.y + 14, pillWidth, 18);
-
-      ctx.fillStyle = isSelected ? '#34d399' : '#e2e8f0';
-      ctx.fillText(labelText, p.x, p.y + 27);
+      if (statusFilter === 'all') return matchesQuery;
+      return matchesQuery && v.status === statusFilter;
     });
+  }, [vehicles, searchQuery, statusFilter]);
 
-  }, [vehicles, selectedVehicleId, showGeofences, showTrails, mapZoom, panOffset]);
-
-  // Canvas Mouse Interactivity
-  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    setIsDragging(true);
-    setDragStart({ x: e.clientX - panOffset.x, y: e.clientY - panOffset.y });
-  };
-
-  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isDragging) return;
-    setPanOffset({
-      x: e.clientX - dragStart.x,
-      y: e.clientY - dragStart.y
-    });
-  };
-
-  const handleMouseUp = () => {
-    setIsDragging(false);
-  };
-
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const clickY = e.clientY - rect.top;
-
-    // Check hit test against vehicles
-    let clickedVehicle: Vehicle | null = null;
-    vehicles.forEach((v) => {
-      const p = geoToPixel(v.location.latitude, v.location.longitude, rect.width, rect.height);
-      const dist = Math.hypot(p.x - clickX, p.y - clickY);
-      if (dist < 20) {
-        clickedVehicle = v;
-      }
-    });
-
-    if (clickedVehicle) {
-      setSelectedVehicleId((clickedVehicle as Vehicle).id);
+  // Compute center from vehicles or fallback to Dubai UAE
+  const defaultCenter = useMemo(() => {
+    if (selectedVehicle) {
+      return {
+        lat: selectedVehicle.location.latitude,
+        lng: selectedVehicle.location.longitude
+      };
     }
-  };
+    if (vehicles.length > 0) {
+      const avgLat = vehicles.reduce((sum, v) => sum + v.location.latitude, 0) / vehicles.length;
+      const avgLng = vehicles.reduce((sum, v) => sum + v.location.longitude, 0) / vehicles.length;
+      return { lat: avgLat, lng: avgLng };
+    }
+    return { lat: 25.1619, lng: 55.4206 }; // Default Dubai / UAE
+  }, [vehicles, selectedVehicle]);
 
-  // Remote Commands
-  const handleTriggerImmobilizer = (vehicle: Vehicle) => {
-    const isCurrentlyCut = vehicle.telemetry.immobilizerCutoffActive;
-    setVehicles((prev) =>
-      prev.map((v) => {
-        if (v.id === vehicle.id) {
-          return {
-            ...v,
-            status: isCurrentlyCut ? 'moving' : 'stopped',
-            telemetry: {
-              ...v.telemetry,
-              immobilizerCutoffActive: !isCurrentlyCut,
-              speedKmh: isCurrentlyCut ? 45 : 0,
-              ignition: !isCurrentlyCut ? false : true,
-              lastPingTime: 'Just now'
-            }
-          };
-        }
-        return v;
-      })
-    );
+  // Command handlers
+  const handleToggleImmobilizer = (vehicle: Vehicle) => {
+    const newCutoff = !vehicle.telemetry.immobilizerCutoffActive;
+    setVehicles(prev => prev.map(v => {
+      if (v.id === vehicle.id) {
+        return {
+          ...v,
+          status: newCutoff ? 'stopped' : 'idle',
+          telemetry: {
+            ...v.telemetry,
+            immobilizerCutoffActive: newCutoff,
+            speedKmh: newCutoff ? 0 : v.telemetry.speedKmh,
+            ignition: !newCutoff,
+            lastPingTime: 'Just now'
+          }
+        };
+      }
+      return v;
+    }));
     setImmobilizerConfirmModal(null);
-    setCommandFeedback(
-      isCurrentlyCut
-        ? `Immobilizer relay released for ${vehicle.plateNumber}. Fuel pump circuit restored.`
-        : `CRITICAL: Remote engine cutoff relay ENGAGED for ${vehicle.plateNumber}. Fuel pump isolated.`
+    setCommandFeedback(newCutoff ? `Engine CUT-OFF activated for ${vehicle.plateNumber}.` : `Engine power RESTORED for ${vehicle.plateNumber}.`);
+    setTimeout(() => setCommandFeedback(null), 4000);
+  };
+
+  const handleSendPing = (vehicleId: string) => {
+    setCommandFeedback(`Direct OTA ping dispatched to device ${vehicleId}. Telemetry ACK received.`);
+    setTimeout(() => setCommandFeedback(null), 3000);
+  };
+
+  const handlePulseAlarm = (vehicleId: string) => {
+    setCommandFeedback(`Audible buzzer & hazard pulse activated on ${vehicleId}.`);
+    setTimeout(() => setCommandFeedback(null), 3000);
+  };
+
+  // High-Precision Vector Canvas Fallback (Used when Google Maps API key is pending activation)
+  const renderCanvasFallback = () => {
+    return (
+      <div className="relative w-full h-full bg-slate-950 flex flex-col items-center justify-center p-6 text-center">
+        {/* Activation Banner */}
+        <div className="max-w-md w-full bg-slate-900 border border-amber-500/40 rounded-2xl p-5 shadow-2xl text-left space-y-3 z-10">
+          <div className="flex items-center gap-2 text-amber-400 font-bold text-xs uppercase tracking-wider">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>Google Maps Platform Activation Required</span>
+          </div>
+
+          <p className="text-xs text-slate-300 leading-relaxed">
+            Your Google Maps API key (<code className="text-emerald-400 font-mono">AIzaSyDq...</code>) is saved, but the <strong>&quot;Maps JavaScript API&quot;</strong> is not enabled in your Google Cloud project.
+          </p>
+
+          <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5 text-[11px]">
+            <div className="text-white font-medium">To enable it in 15 seconds:</div>
+            <ol className="list-decimal list-inside text-slate-400 space-y-1">
+              <li>Click the Google Cloud Console button below</li>
+              <li>Click the blue <strong>&quot;Enable&quot;</strong> button</li>
+              <li>Return here and refresh</li>
+            </ol>
+          </div>
+
+          <div className="pt-1 flex items-center justify-between gap-3">
+            <a
+              href="https://console.cloud.google.com/apis/library/maps-backend.googleapis.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl transition-colors text-xs"
+            >
+              <span>Enable Maps JavaScript API</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+
+            <button
+              onClick={() => window.location.reload()}
+              className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold flex items-center gap-1"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Refresh</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Live Tracking Position Summary */}
+        {selectedVehicle && (
+          <div className="mt-4 max-w-md w-full bg-slate-900/80 border border-slate-800 rounded-xl p-3.5 text-left text-xs space-y-1.5">
+            <div className="flex items-center justify-between text-emerald-400 font-bold">
+              <span>● Live Tracker: {selectedVehicle.plateNumber}</span>
+              <span>{selectedVehicle.telemetry.speedKmh} km/h</span>
+            </div>
+            <div className="text-white font-mono text-[11px]">
+              GPS: {selectedVehicle.location.latitude.toFixed(6)}, {selectedVehicle.location.longitude.toFixed(6)}
+            </div>
+            <div className="text-slate-400 text-[11px] truncate">
+              {selectedVehicle.location.address}
+            </div>
+          </div>
+        )}
+      </div>
     );
-    setTimeout(() => setCommandFeedback(null), 5000);
-  };
-
-  const handlePingImmediate = (vehicle: Vehicle) => {
-    setCommandFeedback(`Immediate telemetry ping request sent to ${vehicle.deviceInfo.deviceModel} (IMEI: ${vehicle.deviceInfo.imei}). Response acknowledged in 82ms.`);
-    setTimeout(() => setCommandFeedback(null), 4000);
-  };
-
-  const handleSoundHorn = (vehicle: Vehicle) => {
-    setCommandFeedback(`Remote alarm horn & hazard lights pulsed 3x on ${vehicle.plateNumber}.`);
-    setTimeout(() => setCommandFeedback(null), 4000);
   };
 
   return (
-    <div className="flex flex-col lg:flex-row h-[calc(100vh-65px)] overflow-hidden bg-slate-950">
-      {/* Left Sidebar: Fleet List & Telemetry Summary */}
-      <div className="w-full lg:w-96 bg-slate-900/90 border-r border-slate-800 flex flex-col shrink-0 z-10">
+    <div className="flex flex-col lg:flex-row h-[calc(100vh-65px)] w-full overflow-hidden bg-slate-950">
+      {/* 1. LEFT SIDEBAR: FLEET REGISTRY & TELEMETRY LIST */}
+      <div className="w-full lg:w-80 xl:w-96 bg-slate-950 border-r border-slate-800 flex flex-col shrink-0 z-10 shadow-lg">
         {/* Search & Filter Header */}
-        <div className="p-4 border-b border-slate-800 space-y-3">
+        <div className="p-3.5 border-b border-slate-800 space-y-2.5">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-bold text-white tracking-tight flex items-center gap-2">
-              <Truck className="w-4 h-4 text-emerald-400" />
-              <span>Fleet Telemetry</span>
-              <span className="text-xs text-slate-400 font-normal">({filteredVehicles.length} units)</span>
-            </h2>
-            <div className="text-[11px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-              Live Gateway Active
+            <div className="flex items-center gap-2">
+              <Compass className="w-4 h-4 text-emerald-400" />
+              <h2 className="text-sm font-bold text-white tracking-tight">Fleet Telematics</h2>
+            </div>
+            <div className="flex items-center gap-1.5 font-mono text-[11px] text-slate-400">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>{filteredVehicles.length} units online</span>
             </div>
           </div>
 
+          {/* Search box */}
           <div className="relative">
-            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
             <input
               type="text"
-              placeholder="Filter plate, vehicle, city, driver..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-emerald-500"
+              placeholder="Search plate, IMEI, driver, city..."
+              className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-900 border border-slate-800 rounded-lg text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500/60"
             />
           </div>
 
-          {/* Segmented status filter buttons */}
-          <div className="flex items-center gap-1 p-0.5 bg-slate-950 rounded-lg border border-slate-800 text-[11px] font-medium">
-            {(['all', 'moving', 'idle', 'stopped'] as const).map((st) => (
+          {/* Filter Pills */}
+          <div className="flex items-center gap-1 overflow-x-auto pb-0.5 text-[11px] font-medium text-slate-400">
+            {(['all', 'moving', 'idle', 'stopped', 'alert'] as const).map((filter) => (
               <button
-                key={st}
-                onClick={() => setStatusFilter(st)}
-                className={`flex-1 py-1 rounded capitalize transition-colors ${
-                  statusFilter === st
-                    ? 'bg-slate-800 text-white font-semibold'
-                    : 'text-slate-400 hover:text-slate-200'
+                key={filter}
+                onClick={() => setStatusFilter(filter)}
+                className={`px-2 py-0.5 rounded capitalize transition-colors whitespace-nowrap ${
+                  statusFilter === filter
+                    ? 'bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/40'
+                    : 'hover:text-slate-200 bg-slate-900/60'
                 }`}
               >
-                {st}
+                {filter}
               </button>
             ))}
           </div>
         </div>
 
-        {/* Vehicle list */}
-        <div className="flex-1 overflow-y-auto divide-y divide-slate-800/60">
+        {/* Vehicle Telematics List */}
+        <div className="flex-1 overflow-y-auto divide-y divide-slate-800/60 p-1.5 space-y-1">
           {filteredVehicles.length === 0 ? (
-            <div className="p-6 text-center text-xs text-slate-500">
-              <Truck className="w-8 h-8 text-slate-600 mx-auto mb-2" />
-              <p className="font-medium text-slate-300">No Trackers Found</p>
-              <p className="text-[11px] text-slate-400 mt-1">
-                Register a hardware tracker or connect a mobile phone beacon to track live GPS.
-              </p>
+            <div className="p-8 text-center text-xs text-slate-500 space-y-2">
+              <Truck className="w-8 h-8 text-slate-700 mx-auto" />
+              <p>No vehicles match your active search filter.</p>
             </div>
           ) : (
             filteredVehicles.map((vehicle) => {
-            const isSelected = vehicle.id === selectedVehicleId;
-            return (
-              <div
-                key={vehicle.id}
-                onClick={() => centerOnVehicle(vehicle)}
-                className={`p-3.5 cursor-pointer transition-all hover:bg-slate-800/50 ${
-                  isSelected ? 'bg-slate-800/90 border-l-2 border-emerald-400' : ''
-                }`}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div>
+              const isSelected = selectedVehicleId === vehicle.id;
+              const isMoving = vehicle.status === 'moving';
+              const isIdle = vehicle.status === 'idle';
+              const isReefer = vehicle.type === 'reefer_truck';
+              const isPhone = vehicle.deviceInfo?.protocol?.includes('OsmAnd') || vehicle.id.startsWith('MOB-');
+
+              return (
+                <div
+                  key={vehicle.id}
+                  onClick={() => setSelectedVehicleId(vehicle.id)}
+                  className={`p-3 rounded-xl cursor-pointer transition-all border ${
+                    isSelected
+                      ? 'bg-slate-900 border-emerald-500/60 shadow-md'
+                      : 'bg-slate-950/40 border-slate-900 hover:border-slate-800 hover:bg-slate-900/40'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
                     <div className="flex items-center gap-2">
-                      <span className="font-mono text-xs font-bold text-white tracking-wide">
-                        {vehicle.plateNumber}
-                      </span>
-                      <span className="text-xs text-slate-400 truncate max-w-[140px]">
-                        {vehicle.name.split('(')[0]}
-                      </span>
+                      <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${
+                        isMoving ? 'bg-emerald-500/15 text-emerald-400' :
+                        isIdle ? 'bg-amber-500/15 text-amber-400' :
+                        'bg-slate-800 text-slate-400'
+                      }`}>
+                        {isPhone ? (
+                          <Smartphone className="w-4 h-4" />
+                        ) : (
+                          <Truck className="w-4 h-4" />
+                        )}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-bold text-xs text-white font-mono">{vehicle.plateNumber}</span>
+                          {vehicle.telemetry.immobilizerCutoffActive && (
+                            <span className="px-1 py-0.2 text-[9px] font-mono bg-rose-500/20 text-rose-300 rounded border border-rose-500/30">
+                              LOCKED
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-slate-400 truncate max-w-[170px]">{vehicle.name}</div>
+                      </div>
                     </div>
-                    <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1">
-                      <MapPin className="w-3 h-3 text-slate-500 shrink-0" />
-                      <span className="truncate max-w-[210px]">{vehicle.location.address}</span>
+
+                    <div className="text-right shrink-0">
+                      <div className="font-mono text-xs font-bold text-white">
+                        {vehicle.telemetry.speedKmh} <span className="text-[10px] text-slate-400 font-normal">km/h</span>
+                      </div>
+                      <span className={`inline-block text-[10px] font-semibold uppercase ${
+                        isMoving ? 'text-emerald-400' :
+                        isIdle ? 'text-amber-400' : 'text-slate-400'
+                      }`}>
+                        ● {vehicle.status}
+                      </span>
                     </div>
                   </div>
 
-                  {/* Status & Speed */}
-                  <div className="text-right shrink-0">
-                    <div className="font-mono text-xs font-bold text-slate-100">
-                      {vehicle.telemetry.speedKmh}{' '}
-                      <span className="text-[10px] font-normal text-slate-400">km/h</span>
+                  {/* Telemetry details summary */}
+                  <div className="mt-2 pt-2 border-t border-slate-900 grid grid-cols-3 gap-1 font-mono text-[10px] text-slate-400">
+                    <div className="flex items-center gap-1">
+                      <Fuel className="w-3 h-3 text-sky-400" />
+                      <span>{vehicle.telemetry.fuelLevelPercent}%</span>
                     </div>
-                    <div className="text-[10px] font-medium capitalize mt-0.5 flex items-center justify-end gap-1">
-                      <span
-                        className={`w-1.5 h-1.5 rounded-full ${
-                          vehicle.status === 'moving'
-                            ? 'bg-emerald-400'
-                            : vehicle.status === 'idle'
-                            ? 'bg-amber-400'
-                            : 'bg-slate-400'
-                        }`}
-                      />
-                      <span className="text-slate-300">{vehicle.status}</span>
+                    {isReefer && (
+                      <div className="flex items-center gap-1 text-teal-400 font-bold">
+                        <Thermometer className="w-3 h-3" />
+                        <span>{vehicle.telemetry.cargoTempC}°C</span>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-1">
+                      <Zap className="w-3 h-3 text-amber-400" />
+                      <span>{vehicle.telemetry.batteryVoltage}V</span>
+                    </div>
+                    <div className="flex items-center gap-1 col-span-2 truncate">
+                      <MapPin className="w-3 h-3 text-emerald-400 shrink-0" />
+                      <span className="truncate">{vehicle.location.address}</span>
                     </div>
                   </div>
                 </div>
-
-                {/* Sub telemetry metrics (Fuel, Temp, Driver) */}
-                <div className="mt-2.5 pt-2 border-t border-slate-800/40 grid grid-cols-3 gap-2 text-[10px] text-slate-400 font-mono">
-                  <div className="flex items-center gap-1">
-                    <Fuel className="w-3 h-3 text-emerald-400/80" />
-                    <span>{vehicle.telemetry.fuelLevelPercent}%</span>
-                  </div>
-                  {vehicle.telemetry.cargoTempC !== undefined ? (
-                    <div className="flex items-center gap-1">
-                      <Thermometer className="w-3 h-3 text-sky-400" />
-                      <span className={vehicle.telemetry.cargoTempC > -18 ? 'text-amber-400 font-bold' : 'text-sky-300'}>
-                        {vehicle.telemetry.cargoTempC}°C
-                      </span>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-1">
-                      <Activity className="w-3 h-3 text-indigo-400" />
-                      <span>{vehicle.telemetry.engineRpm} RPM</span>
-                    </div>
-                  )}
-                  <div className="flex items-center justify-end gap-1 truncate text-slate-300">
-                    <span className="truncate">{vehicle.driverName.split(' ')[0]}</span>
-                  </div>
-                </div>
-              </div>
-            );
-          }))}
+              );
+            })
+          )}
         </div>
       </div>
 
-      {/* Center: Interactive Map Canvas */}
-      <div className="flex-1 relative flex flex-col min-w-0">
-        {/* Floating Map Controls & Overlays */}
-        <div className="absolute top-4 left-4 z-20 flex items-center gap-2">
-          <div className="flex items-center gap-1 bg-slate-900/90 border border-slate-800 p-1 rounded-lg backdrop-blur text-xs">
+      {/* 2. CENTER: GOOGLE MAPS LAYOUT */}
+      <div className="flex-1 relative h-full w-full overflow-hidden">
+        {/* Floating Controls Ribbon on top of Google Maps */}
+        <div className="absolute top-3 left-3 right-3 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
+          {/* Map Layer Mode Switcher */}
+          <div className="pointer-events-auto flex items-center gap-1 bg-slate-950/90 backdrop-blur-md border border-slate-800 p-1 rounded-xl shadow-xl text-xs font-medium">
+            <button
+              onClick={() => setMapTheme('roadmap')}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-colors ${
+                mapTheme === 'roadmap' ? 'bg-slate-800 text-sky-400 font-bold shadow-sm' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Navigation className="w-3.5 h-3.5" />
+              <span>Google Roads</span>
+            </button>
+            <button
+              onClick={() => setMapTheme('satellite')}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-colors ${
+                mapTheme === 'satellite' ? 'bg-slate-800 text-amber-400 font-bold shadow-sm' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Satellite className="w-3.5 h-3.5" />
+              <span>Satellite</span>
+            </button>
+            <button
+              onClick={() => setMapTheme('hybrid')}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-colors ${
+                mapTheme === 'hybrid' ? 'bg-slate-800 text-emerald-400 font-bold shadow-sm' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>Hybrid</span>
+            </button>
+          </div>
+
+          {/* Quick Toggle Overlays (Traffic, Geofences, Trails, Auto-Follow) */}
+          <div className="pointer-events-auto flex items-center gap-1 bg-slate-950/90 backdrop-blur-md border border-slate-800 p-1 rounded-xl shadow-xl text-xs">
+            <button
+              onClick={() => setShowTraffic(!showTraffic)}
+              className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                showTraffic ? 'bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/30' : 'text-slate-400 hover:text-white'
+              }`}
+              title="Toggle Live Google Traffic Overlay"
+            >
+              Traffic
+            </button>
             <button
               onClick={() => setShowGeofences(!showGeofences)}
-              className={`px-2.5 py-1 rounded transition-colors ${
-                showGeofences ? 'bg-slate-800 text-emerald-400 font-semibold' : 'text-slate-400 hover:text-white'
+              className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                showGeofences ? 'bg-sky-500/20 text-sky-300 font-bold border border-sky-500/30' : 'text-slate-400 hover:text-white'
               }`}
+              title="Toggle Geofence Boundaries"
             >
               Geofences
             </button>
             <button
               onClick={() => setShowTrails(!showTrails)}
-              className={`px-2.5 py-1 rounded transition-colors ${
-                showTrails ? 'bg-slate-800 text-emerald-400 font-semibold' : 'text-slate-400 hover:text-white'
+              className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                showTrails ? 'bg-purple-500/20 text-purple-300 font-bold border border-purple-500/30' : 'text-slate-400 hover:text-white'
               }`}
+              title="Toggle GPS Breadcrumb Trails"
             >
               Trails
             </button>
             <button
-              onClick={() => {
-                setMapZoom(1);
-                setPanOffset({ x: 0, y: 0 });
-              }}
-              className="px-2 py-1 text-slate-400 hover:text-white rounded"
-              title="Reset View"
+              onClick={() => setAutoFollow(!autoFollow)}
+              className={`px-2 py-1 rounded-lg transition-colors flex items-center gap-1 ${
+                autoFollow ? 'bg-emerald-500/20 text-emerald-300 font-bold' : 'text-slate-400 hover:text-white'
+              }`}
+              title="Auto-Follow Active Tracker"
             >
-              Reset
-            </button>
-          </div>
-
-          <div className="flex items-center bg-slate-900/90 border border-slate-800 rounded-lg p-1 text-xs">
-            <button
-              onClick={() => setMapZoom((z) => Math.min(z + 0.3, 3))}
-              className="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white font-mono font-bold hover:bg-slate-800 rounded"
-              title="Zoom In"
-            >
-              +
-            </button>
-            <button
-              onClick={() => setMapZoom((z) => Math.max(z - 0.3, 0.6))}
-              className="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white font-mono font-bold hover:bg-slate-800 rounded"
-              title="Zoom Out"
-            >
-              -
+              <Crosshair className={`w-3.5 h-3.5 ${autoFollow ? 'text-emerald-400 animate-pulse' : ''}`} />
+              <span className="hidden sm:inline">Follow</span>
             </button>
           </div>
         </div>
 
-        {/* Command Toast */}
+        {/* Feedback Alert Toast */}
         {commandFeedback && (
-          <div className="absolute top-4 right-4 z-30 max-w-md bg-slate-900 border border-emerald-500/40 text-emerald-300 px-4 py-2.5 rounded-lg text-xs shadow-lg backdrop-blur flex items-center gap-2 animate-fade-in">
+          <div className="absolute top-16 left-1/2 -translate-x-1/2 z-20 bg-emerald-950/90 border border-emerald-500/50 text-emerald-300 px-4 py-2 rounded-xl text-xs font-semibold shadow-2xl flex items-center gap-2 animate-fade-in">
             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
             <span>{commandFeedback}</span>
           </div>
         )}
 
-        {/* Map Canvas */}
-        <canvas
-          ref={canvasRef}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onClick={handleCanvasClick}
-          className="w-full h-full cursor-grab active:cursor-grabbing"
-        />
+        {/* Official Google Maps Platform Container Wrapped with Safe Boundary */}
+        <div className="w-full h-full">
+          <GoogleMapErrorBoundary fallback={() => renderCanvasFallback()}>
+            <APIProvider apiKey={googleMapsApiKey}>
+              <Map
+                id="gwtrax-google-map"
+                defaultCenter={defaultCenter}
+                defaultZoom={13}
+                mapId="DEMO_MAP_ID"
+                internalUsageAttributionIds={["gmp_mcp_codeassist_v1_aistudio"]}
+                mapTypeId={mapTheme}
+                gestureHandling="greedy"
+                disableDefaultUI={false}
+                zoomControl={true}
+                fullscreenControl={false}
+                streetViewControl={false}
+                className="w-full h-full"
+              >
+                {/* Traffic Layer */}
+                <TrafficLayerComponent enabled={showTraffic} />
 
-        {/* Map Legend / Footer stats strip */}
-        <div className="absolute bottom-4 left-4 right-4 z-20 pointer-events-none flex flex-wrap items-center justify-between gap-3">
-          <div className="pointer-events-auto bg-slate-950/85 backdrop-blur border border-slate-800 px-3 py-1.5 rounded-lg text-[11px] text-slate-400 font-mono flex items-center gap-4">
-            <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              <span>Moving ({vehicles.filter(v => v.status === 'moving').length})</span>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-amber-400" />
-              <span>Idle ({vehicles.filter(v => v.status === 'idle').length})</span>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-slate-400" />
-              <span>Stopped ({vehicles.filter(v => v.status === 'stopped').length})</span>
-            </span>
-            <span className="hidden sm:inline text-slate-500">| Middle East &amp; Global Gateway 5027/5023</span>
-          </div>
+                {/* Camera Auto-centering on Selected Unit */}
+                <MapCameraController
+                  selectedVehicle={selectedVehicle}
+                  autoCenterEnabled={autoFollow}
+                />
 
-          <button
-            onClick={onOpenRouteOptimizer}
-            className="pointer-events-auto flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs px-3.5 py-2 rounded-lg shadow-lg transition-transform active:scale-95"
-          >
-            <ArrowUpRight className="w-3.5 h-3.5" />
-            <span>Multi-Stop Dispatch Optimizer</span>
-          </button>
+                {/* Geofences Vector Overlays */}
+                <GeofenceOverlays geofences={geofences} enabled={showGeofences} />
+
+                {/* Active Vehicle Trajectory Trail */}
+                <VehicleTrailPolyline vehicle={selectedVehicle} enabled={showTrails} />
+
+                {/* Advanced Markers for all Active Fleet Vehicles (Guarded against early mount) */}
+                <FleetAdvancedMarkers
+                  vehicles={filteredVehicles}
+                  selectedVehicleId={selectedVehicleId}
+                  onSelectVehicle={setSelectedVehicleId}
+                />
+
+                {/* InfoWindow for Selected Vehicle */}
+                {selectedVehicle && (
+                  <InfoWindow
+                    position={{
+                      lat: selectedVehicle.location.latitude,
+                      lng: selectedVehicle.location.longitude
+                    }}
+                    onCloseClick={() => setSelectedVehicleId(null)}
+                    headerContent={
+                      <div className="font-bold text-xs text-slate-900 flex items-center gap-1.5">
+                        <span>{selectedVehicle.plateNumber}</span>
+                        <span className="text-[10px] font-normal text-slate-500">({selectedVehicle.name})</span>
+                      </div>
+                    }
+                  >
+                    <div className="text-xs text-slate-800 space-y-1.5 min-w-[210px] py-1">
+                      <div className="flex items-center justify-between font-mono text-[11px]">
+                        <span>Speed: <strong>{selectedVehicle.telemetry.speedKmh} km/h</strong></span>
+                        <span className="capitalize font-semibold text-emerald-600">● {selectedVehicle.status}</span>
+                      </div>
+                      <div className="text-[10px] text-slate-600 truncate">
+                        {selectedVehicle.location.address}
+                      </div>
+                      <div className="grid grid-cols-2 gap-1 pt-1 border-t border-slate-200 text-[10px] text-slate-700">
+                        <div>Driver: <strong>{selectedVehicle.driverName}</strong></div>
+                        <div>Battery: <strong>{selectedVehicle.telemetry.batteryVoltage}V</strong></div>
+                        <div>Fuel: <strong>{selectedVehicle.telemetry.fuelLevelPercent}%</strong></div>
+                        <div>Sats: <strong>{selectedVehicle.telemetry.satellites} GPS</strong></div>
+                      </div>
+                      <div className="pt-2 flex items-center gap-1.5">
+                        <button
+                          onClick={() => handleSendPing(selectedVehicle.id)}
+                          className="flex-1 py-1 px-2 text-[10px] font-semibold bg-slate-900 text-white rounded hover:bg-slate-800"
+                        >
+                          Ping Device
+                        </button>
+                        <button
+                          onClick={() => setImmobilizerConfirmModal(selectedVehicle)}
+                          className="py-1 px-2 text-[10px] font-semibold bg-rose-600 text-white rounded hover:bg-rose-500"
+                        >
+                          {selectedVehicle.telemetry.immobilizerCutoffActive ? 'Restore' : 'Cut-Off'}
+                        </button>
+                      </div>
+                    </div>
+                  </InfoWindow>
+                )}
+              </Map>
+            </APIProvider>
+          </GoogleMapErrorBoundary>
         </div>
+
+        {/* Quick Link to Route Optimizer */}
+        <button
+          onClick={onOpenRouteOptimizer}
+          className="absolute bottom-4 right-4 z-10 flex items-center gap-2 px-3.5 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl shadow-2xl text-xs transition-transform hover:scale-105"
+        >
+          <ArrowUpRight className="w-4 h-4" />
+          <span>Multi-Stop Dispatch Optimizer</span>
+        </button>
       </div>
 
-      {/* Right Drawer: Active Selected Vehicle Telemetry */}
+      {/* 3. RIGHT SIDEBAR: SELECTED VEHICLE TELEMETRICS & CONTROL CONSOLE */}
       {selectedVehicle && (
-        <div className="w-full lg:w-96 bg-slate-900 border-l border-slate-800 flex flex-col shrink-0 overflow-y-auto">
+        <div className="w-full lg:w-80 xl:w-96 bg-slate-950 border-l border-slate-800 flex flex-col shrink-0 z-10 overflow-y-auto p-4 space-y-4 shadow-xl">
           {/* Header */}
-          <div className="p-4 border-b border-slate-800 flex items-start justify-between">
+          <div className="flex items-start justify-between pb-3 border-b border-slate-800">
             <div>
-              <div className="text-xs font-mono text-emerald-400 uppercase font-semibold">
-                {selectedVehicle.deviceInfo.compliance}
+              <div className="flex items-center gap-1.5">
+                <span className="font-mono text-base font-bold text-white">{selectedVehicle.plateNumber}</span>
+                <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                  selectedVehicle.status === 'moving' ? 'bg-emerald-500/20 text-emerald-300' :
+                  selectedVehicle.status === 'idle' ? 'bg-amber-500/20 text-amber-300' :
+                  'bg-slate-800 text-slate-300'
+                }`}>
+                  {selectedVehicle.status}
+                </span>
               </div>
-              <h3 className="text-base font-bold text-white mt-0.5">
-                {selectedVehicle.plateNumber}
-              </h3>
-              <p className="text-xs text-slate-400">
-                {selectedVehicle.name}
-              </p>
+              <p className="text-xs text-slate-400 mt-0.5">{selectedVehicle.name}</p>
             </div>
             <button
               onClick={() => setSelectedVehicleId(null)}
-              className="text-slate-400 hover:text-white p-1"
+              className="text-slate-500 hover:text-white text-xs p-1"
             >
               ✕
             </button>
           </div>
 
-          {/* Critical Immobilizer Status Banner */}
-          {selectedVehicle.telemetry.immobilizerCutoffActive && (
-            <div className="bg-rose-500/20 border-b border-rose-500/40 p-3 flex items-center gap-2 text-rose-300 text-xs">
-              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-              <div>
-                <span className="font-bold">ENGINE IMMOBILIZER ENGAGED</span>
-                <p className="text-[11px] text-rose-300/80">Vehicle starter relay cut. Ignition disabled remotely.</p>
+          {/* Primary Gauges */}
+          <div className="grid grid-cols-2 gap-2.5">
+            <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
+              <div className="flex items-center justify-between text-slate-400 text-[11px] mb-1">
+                <span>Speed</span>
+                <Gauge className="w-3.5 h-3.5 text-emerald-400" />
               </div>
-            </div>
-          )}
-
-          {/* Real-Time Live Telemetry Gauges */}
-          <div className="p-4 space-y-4">
-            <div className="grid grid-cols-2 gap-3">
-              {/* Speed Gauge */}
-              <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
-                <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span className="flex items-center gap-1">
-                    <Gauge className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Speed</span>
-                  </span>
-                  <span className="font-mono text-[10px] text-slate-500">Max {selectedVehicle.telemetry.speedLimitKmh}</span>
-                </div>
-                <div className="mt-2 font-mono text-2xl font-bold text-white">
-                  {selectedVehicle.telemetry.speedKmh}{' '}
-                  <span className="text-xs font-normal text-slate-400">km/h</span>
-                </div>
-                <div className="w-full bg-slate-800 h-1.5 rounded-full mt-2 overflow-hidden">
-                  <div
-                    className={`h-full transition-all ${
-                      selectedVehicle.telemetry.speedKmh > selectedVehicle.telemetry.speedLimitKmh
-                        ? 'bg-rose-500'
-                        : 'bg-emerald-400'
-                    }`}
-                    style={{
-                      width: `${Math.min(
-                        (selectedVehicle.telemetry.speedKmh / selectedVehicle.telemetry.speedLimitKmh) * 100,
-                        100
-                      )}%`
-                    }}
-                  />
-                </div>
+              <div className="text-xl font-bold font-mono text-white">
+                {selectedVehicle.telemetry.speedKmh} <span className="text-xs text-slate-400 font-normal">km/h</span>
               </div>
-
-              {/* Fuel Level */}
-              <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
-                <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span className="flex items-center gap-1">
-                    <Fuel className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Fuel Tank</span>
-                  </span>
-                  <span className="font-mono text-[10px] text-slate-500">
-                    {Math.round((selectedVehicle.telemetry.fuelLevelPercent / 100) * selectedVehicle.telemetry.fuelCapacityLiters)} L
-                  </span>
-                </div>
-                <div className="mt-2 font-mono text-2xl font-bold text-white">
-                  {selectedVehicle.telemetry.fuelLevelPercent}%
-                </div>
-                <div className="w-full bg-slate-800 h-1.5 rounded-full mt-2 overflow-hidden">
-                  <div
-                    className="h-full bg-amber-400"
-                    style={{ width: `${selectedVehicle.telemetry.fuelLevelPercent}%` }}
-                  />
-                </div>
-              </div>
+              <div className="text-[10px] text-slate-500 mt-1">Limit: {selectedVehicle.telemetry.speedLimitKmh} km/h</div>
             </div>
 
-            {/* Reefer Cold-Chain Temp or Engine RPM */}
-            {selectedVehicle.telemetry.cargoTempC !== undefined && (
-              <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
-                <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span className="flex items-center gap-1.5">
-                    <Thermometer className="w-3.5 h-3.5 text-sky-400" />
-                    <span className="font-medium text-slate-200">Reefer Cold-Chain Cargo Temp</span>
-                  </span>
-                  <span className="font-mono text-[10px] text-sky-400">Target &lt; -18.0°C</span>
-                </div>
-                <div className="mt-2 flex items-baseline justify-between">
-                  <span className={`font-mono text-2xl font-bold ${selectedVehicle.telemetry.cargoTempC > -18 ? 'text-amber-400' : 'text-sky-300'}`}>
-                    {selectedVehicle.telemetry.cargoTempC}°C
-                  </span>
-                  <span className="text-[11px] font-mono text-slate-400">
-                    Pharma Grade BLE Sensor (ESCORT)
-                  </span>
-                </div>
+            <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
+              <div className="flex items-center justify-between text-slate-400 text-[11px] mb-1">
+                <span>Fuel / Battery</span>
+                <Fuel className="w-3.5 h-3.5 text-sky-400" />
               </div>
-            )}
+              <div className="text-xl font-bold font-mono text-white">
+                {selectedVehicle.telemetry.fuelLevelPercent}%
+              </div>
+              <div className="text-[10px] text-slate-500 mt-1">Voltage: {selectedVehicle.telemetry.batteryVoltage}V</div>
+            </div>
+          </div>
 
-            {/* Secondary Telemetry Grid */}
-            <div className="grid grid-cols-3 gap-2 text-xs font-mono">
-              <div className="bg-slate-950 p-2.5 rounded border border-slate-800">
-                <div className="text-[10px] text-slate-400">Engine RPM</div>
-                <div className="text-slate-100 font-bold mt-1">{selectedVehicle.telemetry.engineRpm}</div>
+          {/* Live Address & Satellites */}
+          <div className="p-3 bg-slate-900/60 rounded-xl border border-slate-800 space-y-1.5 text-xs">
+            <div className="text-slate-400 text-[11px] font-medium flex items-center gap-1.5">
+              <MapPin className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Current Geolocation</span>
+            </div>
+            <div className="text-white font-medium">{selectedVehicle.location.address}</div>
+            <div className="font-mono text-[11px] text-slate-400">
+              {selectedVehicle.location.latitude.toFixed(6)}, {selectedVehicle.location.longitude.toFixed(6)}
+            </div>
+          </div>
+
+          {/* Driver & Telematics Hardware */}
+          <div className="space-y-2 text-xs">
+            <h4 className="text-slate-400 font-semibold text-[11px] uppercase tracking-wider">Telemetry Diagnostics</h4>
+            <div className="p-3 bg-slate-900 rounded-xl border border-slate-800 space-y-2 text-[11px]">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Assigned Driver:</span>
+                <span className="text-white font-medium">{selectedVehicle.driverName}</span>
               </div>
-              <div className="bg-slate-950 p-2.5 rounded border border-slate-800">
-                <div className="text-[10px] text-slate-400">Coolant Temp</div>
-                <div className="text-slate-100 font-bold mt-1">{selectedVehicle.telemetry.coolantTempC}°C</div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Tracker Hardware:</span>
+                <span className="text-white font-medium truncate max-w-[160px]">{selectedVehicle.deviceInfo?.deviceModel || 'GPS Tracker'}</span>
               </div>
-              <div className="bg-slate-950 p-2.5 rounded border border-slate-800">
-                <div className="text-[10px] text-slate-400">Battery Volt</div>
-                <div className="text-slate-100 font-bold mt-1">{selectedVehicle.telemetry.batteryVoltage} V</div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Device IMEI / ID:</span>
+                <span className="text-emerald-400 font-mono font-bold">{selectedVehicle.deviceInfo?.imei}</span>
               </div>
-              <div className="bg-slate-950 p-2.5 rounded border border-slate-800">
-                <div className="text-[10px] text-slate-400">Odometer</div>
-                <div className="text-slate-100 font-bold mt-1">{selectedVehicle.telemetry.odometerKm.toLocaleString()} km</div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Satellites Fixed:</span>
+                <span className="text-white font-mono">{selectedVehicle.telemetry.satellites} GPS / GLONASS</span>
               </div>
-              <div className="bg-slate-950 p-2.5 rounded border border-slate-800">
-                <div className="text-[10px] text-slate-400">Satellites</div>
-                <div className="text-slate-100 font-bold mt-1">{selectedVehicle.telemetry.satellites} GPS/GLONASS</div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">GSM Signal:</span>
+                <span className="text-white font-mono">{selectedVehicle.telemetry.gsmSignalPercent}% (4G LTE)</span>
               </div>
-              <div className="bg-slate-950 p-2.5 rounded border border-slate-800">
-                <div className="text-[10px] text-slate-400">GSM Signal</div>
-                <div className="text-slate-100 font-bold mt-1">{selectedVehicle.telemetry.gsmSignalPercent}% 4G</div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Last Fix Time:</span>
+                <span className="text-white font-mono">{selectedVehicle.telemetry.lastPingTime}</span>
               </div>
             </div>
+          </div>
 
-            {/* Assigned Driver Box */}
-            <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 flex items-center justify-between">
-              <div>
-                <div className="text-[10px] text-slate-400 uppercase font-mono">Assigned Driver</div>
-                <div className="text-sm font-semibold text-white mt-0.5">{selectedVehicle.driverName}</div>
-                <div className="text-xs text-slate-400">{selectedVehicle.location.city}, {selectedVehicle.location.country}</div>
-              </div>
-              <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded border border-emerald-500/20">
-                Ignition: {selectedVehicle.telemetry.ignition ? 'ON' : 'OFF'}
-              </span>
-            </div>
-
-            {/* Current Route Dispatch Info */}
-            {selectedVehicle.currentRoute && (
-              <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 space-y-1.5">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-400">Active Destination</span>
-                  <span className="text-emerald-400 font-mono font-semibold">ETA {selectedVehicle.currentRoute.eta}</span>
-                </div>
-                <div className="text-xs font-medium text-slate-200">
-                  {selectedVehicle.currentRoute.destinationName}
-                </div>
-                <div className="text-[11px] text-slate-400 font-mono">
-                  {selectedVehicle.currentRoute.distanceRemainingKm} km remaining
-                </div>
-              </div>
-            )}
-
-            {/* Hardware Device & Protocol Specs */}
-            <div className="bg-slate-950/60 p-3 rounded-lg border border-slate-800 space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-slate-300 font-semibold flex items-center gap-1.5">
-                  <Radio className="w-3.5 h-3.5 text-indigo-400" />
-                  <span>GPS Device Specs</span>
-                </span>
-                <span className="text-[10px] font-mono text-slate-400">{selectedVehicle.deviceInfo.carrier}</span>
-              </div>
-              <div className="text-xs font-mono text-slate-300 space-y-1">
-                <div>Model: <span className="text-white">{selectedVehicle.deviceInfo.deviceModel}</span></div>
-                <div>Protocol: <span className="text-emerald-400">{selectedVehicle.deviceInfo.protocol}</span></div>
-                <div>IMEI: <span className="text-slate-400">{selectedVehicle.deviceInfo.imei}</span></div>
-                <div>Firmware: <span className="text-slate-400">{selectedVehicle.deviceInfo.firmwareVersion}</span></div>
-              </div>
-            </div>
-
-            {/* Remote Commands Action Buttons */}
-            <div className="pt-2 border-t border-slate-800 space-y-2">
-              <div className="text-xs font-semibold text-slate-300">Remote Telematics Commands</div>
-              
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => handlePingImmediate(selectedVehicle)}
-                  className="flex items-center justify-center gap-1.5 py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium transition-colors"
-                >
-                  <RotateCw className="w-3.5 h-3.5" />
-                  <span>Request Ping</span>
-                </button>
-
-                <button
-                  onClick={() => handleSoundHorn(selectedVehicle)}
-                  className="flex items-center justify-center gap-1.5 py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium transition-colors"
-                >
-                  <Volume2 className="w-3.5 h-3.5" />
-                  <span>Pulse Alarm</span>
-                </button>
-              </div>
-
-              {/* Remote Engine Immobilization Cut-Off */}
+          {/* Remote Security Controls */}
+          <div className="space-y-2 text-xs pt-1">
+            <h4 className="text-slate-400 font-semibold text-[11px] uppercase tracking-wider">Remote Telematics Commands</h4>
+            
+            <div className="grid grid-cols-2 gap-2">
               <button
-                onClick={() => setImmobilizerConfirmModal(selectedVehicle)}
-                className={`w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg text-xs font-bold transition-all shadow-sm ${
-                  selectedVehicle.telemetry.immobilizerCutoffActive
-                    ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
-                    : 'bg-rose-600 hover:bg-rose-500 text-white'
-                }`}
+                onClick={() => handleSendPing(selectedVehicle.id)}
+                className="py-2 px-3 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-xl flex items-center justify-center gap-1.5 transition-colors"
               >
-                {selectedVehicle.telemetry.immobilizerCutoffActive ? (
-                  <>
-                    <Unlock className="w-4 h-4" />
-                    <span>RESTORE ENGINE / RELEASE IMMOBILIZER</span>
-                  </>
-                ) : (
-                  <>
-                    <Lock className="w-4 h-4" />
-                    <span>ENGAGE REMOTE ENGINE CUT-OFF (RELAY)</span>
-                  </>
-                )}
+                <Radio className="w-3.5 h-3.5 text-sky-400" />
+                <span>Request Ping</span>
+              </button>
+
+              <button
+                onClick={() => handlePulseAlarm(selectedVehicle.id)}
+                className="py-2 px-3 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-xl flex items-center justify-center gap-1.5 transition-colors"
+              >
+                <Volume2 className="w-3.5 h-3.5 text-amber-400" />
+                <span>Pulse Alarm</span>
               </button>
             </div>
+
+            {/* Remote Engine Immobilizer Cut-off button */}
+            <button
+              onClick={() => setImmobilizerConfirmModal(selectedVehicle)}
+              className={`w-full py-2.5 px-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all shadow-md ${
+                selectedVehicle.telemetry.immobilizerCutoffActive
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                  : 'bg-rose-600 hover:bg-rose-500 text-white'
+              }`}
+            >
+              {selectedVehicle.telemetry.immobilizerCutoffActive ? (
+                <>
+                  <Unlock className="w-4 h-4" />
+                  <span>Restore Engine Power (Relay Unlock)</span>
+                </>
+              ) : (
+                <>
+                  <Lock className="w-4 h-4" />
+                  <span>Remote Engine Immobilizer Cut-off</span>
+                </>
+              )}
+            </button>
           </div>
         </div>
       )}
 
-      {/* Immobilizer Safety Confirmation Modal */}
+      {/* Immobilizer Confirmation Modal */}
       {immobilizerConfirmModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-fade-in">
-          <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 max-w-md w-full shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-4">
             <div className="flex items-center gap-3 text-rose-400">
               <AlertTriangle className="w-6 h-6" />
               <h3 className="text-base font-bold text-white">
-                {immobilizerConfirmModal.telemetry.immobilizerCutoffActive
-                  ? 'Restore Vehicle Ignition?'
-                  : 'Confirm Remote Engine Immobilization'}
+                {immobilizerConfirmModal.telemetry.immobilizerCutoffActive ? 'Restore Engine Power' : 'Emergency Engine Cut-off'}
               </h3>
             </div>
-            
-            <p className="text-xs text-slate-300 mt-3 leading-relaxed">
+            <p className="text-xs text-slate-300 leading-relaxed">
               {immobilizerConfirmModal.telemetry.immobilizerCutoffActive
-                ? `This will transmit an unlatch relay pulse to the onboard ${immobilizerConfirmModal.deviceInfo.deviceModel} GPS tracker, allowing driver ${immobilizerConfirmModal.driverName} to restart the vehicle.`
-                : `WARNING: You are about to send a hardware relay cutoff pulse to vehicle ${immobilizerConfirmModal.plateNumber} (current speed: ${immobilizerConfirmModal.telemetry.speedKmh} km/h). Telematics safety protocol will cut the fuel pump circuit once speed drops below 20 km/h.`}
+                ? `Confirm unlocking the ignition relay on vehicle ${immobilizerConfirmModal.plateNumber}? Power will be restored immediately.`
+                : `Are you sure you want to trigger the remote ignition relay CUT-OFF on vehicle ${immobilizerConfirmModal.plateNumber}? The engine will be immobilized and the vehicle stopped.`}
             </p>
-
-            <div className="mt-5 flex items-center justify-end gap-3">
+            <div className="flex justify-end gap-2 pt-2">
               <button
                 onClick={() => setImmobilizerConfirmModal(null)}
-                className="px-4 py-2 text-xs font-medium text-slate-300 hover:text-white bg-slate-800 rounded-lg"
+                className="px-4 py-2 bg-slate-800 text-slate-300 hover:text-white rounded-lg text-xs font-semibold"
               >
                 Cancel
               </button>
               <button
-                onClick={() => handleTriggerImmobilizer(immobilizerConfirmModal)}
-                className={`px-4 py-2 text-xs font-bold rounded-lg ${
+                onClick={() => handleToggleImmobilizer(immobilizerConfirmModal)}
+                className={`px-4 py-2 rounded-lg text-xs font-bold text-white ${
                   immobilizerConfirmModal.telemetry.immobilizerCutoffActive
-                    ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
-                    : 'bg-rose-600 hover:bg-rose-500 text-white'
+                    ? 'bg-emerald-600 hover:bg-emerald-500'
+                    : 'bg-rose-600 hover:bg-rose-500'
                 }`}
               >
-                {immobilizerConfirmModal.telemetry.immobilizerCutoffActive ? 'Release Cutoff' : 'Authorize Cutoff'}
+                {immobilizerConfirmModal.telemetry.immobilizerCutoffActive ? 'Confirm Restore' : 'Confirm Cut-off'}
               </button>
             </div>
           </div>

@@ -24,11 +24,40 @@ import { Vehicle, GeofenceZone, FleetAlert } from '../types/fleet.ts';
 import { DriverMetrics } from '../utils/driverScoring.ts';
 import { RouteWaypoint } from '../utils/routeOptimizer.ts';
 
-// Initialize Firebase App singleton
-const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+// Safe env getter for both Vite browser and Node environments
+const getEnv = (key: string): string => {
+  if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env[key]) {
+    return import.meta.env[key];
+  }
+  if (typeof process !== 'undefined' && process.env && process.env[key]) {
+    return process.env[key] as string;
+  }
+  return '';
+};
 
-// CRITICAL: Must pass firestoreDatabaseId if configured
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+// Resolve configuration dynamically from environment variables (e.g., on Vercel) or fallback to applet config
+export const resolvedFirebaseConfig = {
+  projectId: getEnv('VITE_FIREBASE_PROJECT_ID') || firebaseConfig.projectId,
+  appId: getEnv('VITE_FIREBASE_APP_ID') || firebaseConfig.appId,
+  apiKey: getEnv('VITE_FIREBASE_API_KEY') || firebaseConfig.apiKey,
+  authDomain: getEnv('VITE_FIREBASE_AUTH_DOMAIN') || firebaseConfig.authDomain,
+  firestoreDatabaseId:
+    getEnv('VITE_FIREBASE_FIRESTORE_DATABASE_ID') ||
+    firebaseConfig.firestoreDatabaseId ||
+    '(default)',
+  storageBucket: getEnv('VITE_FIREBASE_STORAGE_BUCKET') || firebaseConfig.storageBucket,
+  messagingSenderId: getEnv('VITE_FIREBASE_MESSAGING_SENDER_ID') || firebaseConfig.messagingSenderId,
+};
+
+// Initialize Firebase App singleton
+const app = getApps().length > 0 ? getApp() : initializeApp(resolvedFirebaseConfig);
+
+// CRITICAL: Connect to custom database ID if specified and not (default), else connect to default database
+export const db =
+  resolvedFirebaseConfig.firestoreDatabaseId &&
+  resolvedFirebaseConfig.firestoreDatabaseId !== '(default)'
+    ? getFirestore(app, resolvedFirebaseConfig.firestoreDatabaseId)
+    : getFirestore(app);
 export const auth = getAuth(app);
 
 export enum OperationType {

@@ -361,8 +361,12 @@ export const ConnectMobileModal: React.FC<ConnectMobileModalProps> = ({
                 <div className="flex items-start gap-2.5 p-2.5 bg-slate-900 rounded-lg border border-slate-800">
                   <span className="font-mono font-bold text-sky-400 text-xs">Step 4:</span>
                   <div>
-                    <span className="text-white font-medium">Toggle &quot;Service Status&quot; to ON</span>
-                    <p className="text-[11px] text-slate-400">The app will begin transmitting battery %, speed, and location automatically in the background!</p>
+                    <span className="text-white font-medium">Turn the Tracking Switch to ON</span>
+                    <p className="text-[11px] text-slate-300 mt-1 leading-relaxed">
+                      • On <strong className="text-emerald-400">Android</strong>: The switch at the top is labeled <strong>&quot;Service status&quot;</strong>.<br />
+                      • On <strong className="text-sky-400">iPhone / iOS</strong>: The switch at the top right is labeled <strong>&quot;Tracking&quot;</strong> or <strong>&quot;Status&quot;</strong> (toggle it to green/ON).
+                    </p>
+                    <p className="text-[10px] text-slate-400 mt-0.5">The app will immediately start transmitting live GPS updates to GWTrax in the background!</p>
                   </div>
                 </div>
               </div>
